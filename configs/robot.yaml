@@ -1,0 +1,16 @@
+simple_avoid:
+  ros__parameters:
+    # Topics
+    scan_topic: "/scan"
+    cmd_vel_topic: "/cmd_vel"
+
+    # Motion settings (m/s and rad/s)
+    forward_speed: 0.20       
+    turn_speed: 0.60           
+
+    # Obstacle detection
+    min_front_distance: 0.50   # stop/turn if anything closer than this
+    front_angle_width_deg: 60.0  # front arc to check 
+
+    # Control loop
+    control_rate_hz: 10.0      # how often to send cmd_vel
