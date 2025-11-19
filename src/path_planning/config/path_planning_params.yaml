@@ -1,0 +1,30 @@
+path_planning:
+  ros__parameters:
+    # Basic movement parameters
+    max_linear_velocity: 0.3        # m/s
+    max_angular_velocity: 1.0       # rad/s
+    min_linear_velocity: 0.05       # m/s
+    min_angular_velocity: 0.1       # rad/s
+
+    # Waypoint following
+    waypoint_tolerance: 0.2         # meters - how close to reach waypoint
+    goal_tolerance: 0.1             # meters - final goal tolerance
+    angular_tolerance: 0.1          # radians - orientation tolerance
+
+    # Path planning parameters
+    planning_frequency: 10.0        # Hz - how often to replan
+    controller_frequency: 20.0      # Hz - control loop frequency
+
+    # Safety parameters
+    min_obstacle_distance: 0.5      # meters - minimum distance to obstacles
+    emergency_stop_distance: 0.3    # meters - emergency brake distance
+
+    # Topics
+    cmd_vel_topic: "/cmd_vel"
+    goal_pose_topic: "/goal_pose"
+    current_pose_topic: "/amcl_pose"  # Will be available in Level 2
+    map_topic: "/map"                 # Will be available in Level 2
+
+    # Frame IDs
+    global_frame: "map"              # Global coordinate frame
+    robot_frame: "base_link"         # Robot coordinate frame
