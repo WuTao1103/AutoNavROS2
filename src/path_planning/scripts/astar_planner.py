@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+"""
+A* Path Planner with improved line-of-sight checking
+Fixed: Path no longer cuts through small obstacles during smoothing
+"""
 
 import rclpy
 from rclpy.node import Node
@@ -40,8 +44,9 @@ class AStarPlanner(Node):
                 ('map_topic', '/map'),
                 ('allow_diagonal', True),
                 ('heuristic_weight', 1.0),
-                ('inflation_radius', 0.2),  # meters
+                ('inflation_radius', 0.3),  # 增加到 0.3m，原来是 0.2m
                 ('robot_radius', 0.2),      # meters
+                ('enable_smoothing', False), # 默认禁用平滑，避免穿过小障碍物
             ])
 
         # Get parameters
@@ -49,6 +54,7 @@ class AStarPlanner(Node):
         self.heuristic_weight = self.get_parameter('heuristic_weight').value
         self.inflation_radius = self.get_parameter('inflation_radius').value
         self.robot_radius = self.get_parameter('robot_radius').value
+        self.enable_smoothing = self.get_parameter('enable_smoothing').value
 
         # Map subscriber
         self.map_sub = self.create_subscription(
@@ -63,7 +69,7 @@ class AStarPlanner(Node):
         self.map_info = None
         self.inflated_map = None
 
-        self.get_logger().info("A* Planner initialized")
+        self.get_logger().info(f"A* Planner initialized (smoothing={'ON' if self.enable_smoothing else 'OFF'}, inflation={self.inflation_radius}m)")
 
     def map_callback(self, msg):
         """Receive and process occupancy grid map"""
@@ -192,48 +198,64 @@ class AStarPlanner(Node):
         path_points.reverse()
         return path_points
 
-    def smooth_path(self, path_points):
-        """Apply simple path smoothing to reduce jagged edges"""
-        if len(path_points) < 3:
-            return path_points
-
-        smoothed = [path_points[0]]  # Always keep start point
-
-        i = 0
-        while i < len(path_points) - 1:
-            # Look ahead to find the furthest point we can reach directly
-            furthest = i + 1
-
-            # Be more conservative with smoothing - limit lookahead distance
-            max_lookahead = min(i + 5, len(path_points))  # Limit to 5 points ahead
-
-            for j in range(i + 2, max_lookahead):
-                # Calculate distance to avoid overly long jumps
-                start_point = path_points[i]
-                test_point = path_points[j]
-                distance = ((test_point[0] - start_point[0])**2 + (test_point[1] - start_point[1])**2)**0.5
-
-                # Limit maximum jump distance (in meters) - be more permissive
-                max_jump_distance = 3.0  # increased from 2.0 to 3.0 meters
-
-                if distance > max_jump_distance:
-                    self.get_logger().debug(f"Skipping smoothing: distance {distance:.2f}m > {max_jump_distance}m")
-                    break
-
-                if self.line_of_sight(path_points[i], path_points[j]):
-                    furthest = j
-                else:
-                    self.get_logger().debug(f"Line of sight blocked from point {i} to {j}")
-                    break
-
-            smoothed.append(path_points[furthest])
-            i = furthest
-
-        self.get_logger().debug(f"Smoothing: {len(path_points)} -> {len(smoothed)} points")
-        return smoothed
+    def bresenham_line(self, x0, y0, x1, y1):
+        """
+        Supercover variant of Bresenham's line algorithm
+        Returns ALL cells that the line passes through (not just the closest)
+        This ensures no small obstacle is missed
+        """
+        cells = []
+        
+        dx = abs(x1 - x0)
+        dy = abs(y1 - y0)
+        sx = 1 if x0 < x1 else -1
+        sy = 1 if y0 < y1 else -1
+        
+        x, y = x0, y0
+        
+        if dx == 0 and dy == 0:
+            return [(x0, y0)]
+        
+        if dx >= dy:
+            err = dx / 2.0
+            while x != x1:
+                cells.append((x, y))
+                err -= dy
+                if err < 0:
+                    y += sy
+                    err += dx
+                    # Supercover: also add the diagonal neighbor
+                    cells.append((x + sx, y - sy))
+                x += sx
+        else:
+            err = dy / 2.0
+            while y != y1:
+                cells.append((x, y))
+                err -= dx
+                if err < 0:
+                    x += sx
+                    err += dy
+                    # Supercover: also add the diagonal neighbor
+                    cells.append((x - sx, y + sy))
+                y += sy
+        
+        cells.append((x1, y1))
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_cells = []
+        for cell in cells:
+            if cell not in seen:
+                seen.add(cell)
+                unique_cells.append(cell)
+        
+        return unique_cells
 
     def line_of_sight(self, start_point, end_point):
-        """Check if there's a clear line of sight between two world points"""
+        """
+        Check if there's a clear line of sight between two world points
+        Uses Bresenham algorithm to guarantee no cell is skipped
+        """
         # Convert to grid coordinates
         x0, y0 = self.world_to_grid(start_point[0], start_point[1])
         x1, y1 = self.world_to_grid(end_point[0], end_point[1])
@@ -242,59 +264,78 @@ class AStarPlanner(Node):
             self.get_logger().debug(f"Invalid coordinates in line_of_sight: {start_point} -> {end_point}")
             return False
 
-        # Add safety margin - check if endpoints are valid
+        # Check if endpoints are valid
         if not self.is_valid_cell(x0, y0) or not self.is_valid_cell(x1, y1):
             self.get_logger().debug(f"Start or end point not valid: ({x0},{y0}) or ({x1},{y1})")
             return False
 
-        # For very short distances, still check the path
-        distance = abs(x1 - x0) + abs(y1 - y0)
-        if distance < 2:
-            # Even for short distances, check intermediate points
-            return self.check_line_with_safety_margin(x0, y0, x1, y1)
-
-        # Use denser line checking algorithm
-        return self.check_line_with_safety_margin(x0, y0, x1, y1)
-
-    def check_line_with_safety_margin(self, x0, y0, x1, y1):
-        """Check line of sight with safety margin for thin obstacles"""
-        # Use supersampling - check more points along the line
-        dx = abs(x1 - x0)
-        dy = abs(y1 - y0)
-
-        # Calculate the number of steps - use more steps for denser checking
-        steps = max(dx, dy) * 2  # Double density
-        if steps == 0:
-            return True
-
-        # Check points along the line using linear interpolation
-        for i in range(steps + 1):
-            t = i / steps if steps > 0 else 0
-            x = int(round(x0 + t * (x1 - x0)))
-            y = int(round(y0 + t * (y1 - y0)))
-
-            # Check the main point
+        # Get all cells along the line using Bresenham
+        cells = self.bresenham_line(x0, y0, x1, y1)
+        
+        for x, y in cells:
+            # Check the main cell
             if not self.is_valid_cell(x, y):
-                self.get_logger().debug(f"Obstacle detected at ({x},{y}) during line check")
+                self.get_logger().debug(f"Obstacle detected at ({x},{y})")
                 return False
-
-            # Add safety margin by checking adjacent cells for thin obstacles
-            # This helps detect narrow passages that might be missed
-            safety_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-            obstacle_count = 0
-
-            for dx_offset, dy_offset in safety_offsets:
-                check_x = x + dx_offset
-                check_y = y + dy_offset
-                if not self.is_valid_cell(check_x, check_y):
-                    obstacle_count += 1
-
-            # If surrounded by too many obstacles, it's likely a narrow passage
-            if obstacle_count >= 3:
-                self.get_logger().debug(f"Narrow passage detected at ({x},{y}) - obstacle count: {obstacle_count}")
+            
+            # Safety margin: check adjacent cells to avoid grazing obstacles
+            # This prevents paths that just barely pass by obstacles
+            adjacent_obstacles = 0
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                if not self.is_valid_cell(x + dx, y + dy):
+                    adjacent_obstacles += 1
+            
+            # If too close to multiple obstacles, consider it blocked
+            if adjacent_obstacles >= 2:
+                self.get_logger().debug(f"Too close to obstacles at ({x},{y})")
                 return False
 
         return True
+
+    def smooth_path(self, path_points):
+        """
+        Apply path smoothing with improved line-of-sight checking
+        More conservative approach to avoid cutting through obstacles
+        """
+        if len(path_points) < 3:
+            return path_points
+
+        smoothed = [path_points[0]]  # Always keep start point
+
+        i = 0
+        while i < len(path_points) - 1:
+            # Start with the next point as the furthest reachable
+            furthest = i + 1
+
+            # Limit lookahead to avoid overly aggressive smoothing
+            max_lookahead = min(i + 4, len(path_points))  # 减少到 4 点
+
+            for j in range(i + 2, max_lookahead):
+                # Calculate distance to avoid overly long jumps
+                start_point = path_points[i]
+                test_point = path_points[j]
+                distance = math.sqrt(
+                    (test_point[0] - start_point[0])**2 + 
+                    (test_point[1] - start_point[1])**2
+                )
+
+                # Limit maximum jump distance (更保守)
+                max_jump_distance = 1.5  # 从 3.0 减少到 1.5 米
+
+                if distance > max_jump_distance:
+                    break
+
+                if self.line_of_sight(path_points[i], path_points[j]):
+                    furthest = j
+                else:
+                    # Once line of sight is blocked, stop looking further
+                    break
+
+            smoothed.append(path_points[furthest])
+            i = furthest
+
+        self.get_logger().info(f"Smoothing: {len(path_points)} -> {len(smoothed)} points")
+        return smoothed
 
     def plan_path(self, start_world, goal_world):
         """Plan path from start to goal using A* algorithm"""
@@ -350,15 +391,15 @@ class AStarPlanner(Node):
                 self.get_logger().info(f"Path found in {iterations} iterations")
                 path_points = self.reconstruct_path(current_node)
 
-                # Apply path smoothing with safer parameters
-                smoothed_path = self.smooth_path(path_points)
-                self.get_logger().info(f"Path smoothed from {len(path_points)} to {len(smoothed_path)} points")
+                # Apply path smoothing only if enabled
+                if self.enable_smoothing:
+                    final_path = self.smooth_path(path_points)
+                    self.get_logger().info(f"Smoothing enabled: {len(path_points)} -> {len(final_path)} points")
+                else:
+                    final_path = path_points
+                    self.get_logger().info(f"Smoothing disabled: {len(final_path)} points (raw A* path)")
 
-                # Debug: log original and smoothed path
-                self.get_logger().info(f"Original path: {path_points[:3]}...{path_points[-3:] if len(path_points) > 3 else path_points}")
-                self.get_logger().info(f"Smoothed path: {smoothed_path}")
-
-                return smoothed_path
+                return final_path
 
             closed_set.add(current_pos)
 
