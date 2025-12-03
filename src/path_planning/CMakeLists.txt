@@ -42,6 +42,7 @@ install(PROGRAMS
   scripts/simple_map_simulator.py
   scripts/simple_visualizer.py
   scripts/interactive_planner.py
+  scripts/goal_pose_bridge.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -21,6 +21,8 @@
   <depend>tf2</depend>
   <depend>tf2_ros</depend>
   <depend>tf2_geometry_msgs</depend>
+  <depend>gazebo_msgs</depend>
+  <depend>ros_gz_interfaces</depend>
 
   <!-- Navigation stack dependencies (commented for basic testing) -->
   <!-- <depend>nav2_msgs</depend> -->

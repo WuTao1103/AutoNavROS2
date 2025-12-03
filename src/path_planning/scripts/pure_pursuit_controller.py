@@ -5,7 +5,7 @@ from rclpy.node import Node
 import math
 import numpy as np
 
-from geometry_msgs.msg import Twist, PoseStamped, Point
+from geometry_msgs.msg import TwistStamped, PoseStamped, Point
 from nav_msgs.msg import Path
 from tf2_ros import TransformListener, Buffer
 from tf2_geometry_msgs import do_transform_pose
@@ -20,14 +20,14 @@ class PurePursuitController(Node):
         self.declare_parameters(
             namespace='',
             parameters=[
-                ('lookahead_distance', 0.5),
-                ('max_linear_velocity', 0.3),
-                ('max_angular_velocity', 1.0),
+                ('lookahead_distance', 1.2),
+                ('max_linear_velocity', 1.5),
+                ('max_angular_velocity', 3.0),
                 ('goal_tolerance', 0.1),
                 ('cmd_vel_topic', '/cmd_vel'),
                 ('path_topic', '/path'),
                 ('robot_frame', 'base_link'),
-                ('global_frame', 'map')
+                ('global_frame', 'odom')  # Changed to odom for better reliability
             ])
 
         # Get parameters
@@ -40,7 +40,7 @@ class PurePursuitController(Node):
 
         # Publishers and Subscribers
         self.cmd_vel_pub = self.create_publisher(
-            Twist,
+            TwistStamped,
             self.get_parameter('cmd_vel_topic').value,
             10
         )
@@ -65,6 +65,8 @@ class PurePursuitController(Node):
         self.control_timer = self.create_timer(0.1, self.control_loop)
 
         self.get_logger().info("Pure Pursuit Controller initialized")
+        self.get_logger().info(f"Using TwistStamped for cmd_vel")
+        self.get_logger().info(f"Frames: global={self.global_frame}, robot={self.robot_frame}")
 
     def path_callback(self, msg):
         """Receive new path to follow"""
@@ -91,7 +93,7 @@ class PurePursuitController(Node):
             return pose
 
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
-            self.get_logger().warn(f"Failed to get robot pose: {e}")
+            self.get_logger().warn(f"Failed to get robot pose: {e}", throttle_duration_sec=5.0)
             return None
 
     def find_lookahead_point(self, path, robot_pose):
@@ -177,42 +179,47 @@ class PurePursuitController(Node):
 
     def control_loop(self):
         """Main control loop"""
+        # Create velocity command
+        cmd_vel = TwistStamped()
+        cmd_vel.header.stamp = self.get_clock().now().to_msg()
+        cmd_vel.header.frame_id = self.robot_frame
+
         if self.goal_reached or not self.current_path:
-            # Stop the robot
-            cmd_vel = Twist()
+            # Stop the robot - all velocities are 0
+            # cmd_vel.twist is already 0 by default
             self.cmd_vel_pub.publish(cmd_vel)
             return
 
         # Get current robot pose
         robot_pose = self.get_robot_pose()
         if not robot_pose:
+            # Cannot get robot position, send stop command
+            self.cmd_vel_pub.publish(cmd_vel)
             return
 
         # Check if goal is reached
         if self.is_goal_reached(robot_pose, self.current_path):
             self.goal_reached = True
             self.get_logger().info("Goal reached!")
-            cmd_vel = Twist()
+            # cmd_vel.twist is already 0
             self.cmd_vel_pub.publish(cmd_vel)
             return
 
         # Find lookahead point
         target_point = self.find_lookahead_point(self.current_path, robot_pose)
         if not target_point:
+            self.cmd_vel_pub.publish(cmd_vel)
             return
 
         # Calculate steering angle
         steering_angle = self.calculate_steering_angle(robot_pose, target_point)
 
-        # Create velocity command
-        cmd_vel = Twist()
-
-        # Linear velocity (reduce when turning)
-        linear_vel = self.max_linear_vel * (1.0 - abs(steering_angle) / math.pi)
-        cmd_vel.linear.x = max(0.1, linear_vel)  # Minimum forward speed
+        # Linear velocity (reduce when turning, but not too much)
+        linear_vel = self.max_linear_vel * (1.0 - 0.2 * abs(steering_angle) / math.pi)
+        cmd_vel.twist.linear.x = max(0.8, linear_vel)
 
         # Angular velocity
-        cmd_vel.angular.z = max(-self.max_angular_vel,
+        cmd_vel.twist.angular.z = max(-self.max_angular_vel,
                                min(self.max_angular_vel, steering_angle * 2.0))
 
         # Publish command
@@ -222,7 +229,7 @@ class PurePursuitController(Node):
         self.get_logger().debug(
             f"Target: ({target_point.x:.2f}, {target_point.y:.2f}), "
             f"Steering: {math.degrees(steering_angle):.1f}°, "
-            f"Linear: {cmd_vel.linear.x:.2f}, Angular: {cmd_vel.angular.z:.2f}"
+            f"Linear: {cmd_vel.twist.linear.x:.2f}, Angular: {cmd_vel.twist.angular.z:.2f}"
         )
 
 

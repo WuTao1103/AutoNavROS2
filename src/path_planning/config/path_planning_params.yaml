@@ -2,10 +2,10 @@
 pure_pursuit_controller:
   ros__parameters:
     # Pure pursuit parameters
-    lookahead_distance: 0.5         # meters - lookahead distance for pure pursuit
-    max_linear_velocity: 0.3        # m/s
-    max_angular_velocity: 1.0       # rad/s
-    goal_tolerance: 0.1             # meters - final goal tolerance
+    lookahead_distance: 1.2         # meters - increased lookahead for higher speeds
+    max_linear_velocity: 1.5        # m/s - increased to 1.5m/s for faster movement
+    max_angular_velocity: 3.0       # rad/s - increased to 3.0rad/s for faster turns
+    goal_tolerance: 0.15            # meters - final goal tolerance
 
     # Topics
     cmd_vel_topic: "/cmd_vel"
@@ -30,12 +30,8 @@ path_planning_service:
     # A* planner parameters
     allow_diagonal: true
     heuristic_weight: 1.0
-    inflation_radius: 0.2           # meters - obstacle inflation
+    inflation_radius: 0.4           # changed to 0.4 (was 0.2)
     robot_radius: 0.2               # meters - robot radius
-
-# Test Client Parameters
-test_path_planning_client:
-  ros__parameters:
-    service_name: "plan_path"
-    frame_id: "map"
-    test_interval: 10.0             # seconds between tests
+    obstacle_threshold: 50          # added this parameter
+    enable_smoothing: false         # added this, disable smoothing
+    debug_mode: true                # added this, enable debugging

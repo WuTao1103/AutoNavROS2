@@ -1,250 +1,410 @@
 #!/usr/bin/env python3
+"""
+Path Planning Service - Cleaned version
+Removed unnecessary cmd_vel publisher
+"""
 
 import rclpy
 from rclpy.node import Node
 import time
 import math
+import heapq
+import numpy as np
+import threading
 
 from nav_msgs.msg import OccupancyGrid, Path
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import PoseStamped
 from path_planning.srv import PlanPath
 from std_msgs.msg import Header
 
-# Import the AStarPlanner class from the same directory
-import sys
-import os
-sys.path.append(os.path.dirname(__file__))
-from astar_planner import AStarPlanner
+
+class Node2D:
+    __slots__ = ['x', 'y', 'cost', 'heuristic', 'parent']
+    
+    def __init__(self, x, y, cost=0.0, heuristic=0.0, parent=None):
+        self.x = x
+        self.y = y
+        self.cost = cost
+        self.heuristic = heuristic
+        self.parent = parent
+
+    @property
+    def f_cost(self):
+        return self.cost + self.heuristic
+
+    def __lt__(self, other):
+        return self.f_cost < other.f_cost
 
 
 class PathPlanningService(Node):
     def __init__(self):
         super().__init__('path_planning_service')
 
-        # Parameters
         self.declare_parameters(
             namespace='',
             parameters=[
                 ('service_name', 'plan_path'),
                 ('path_topic', '/path'),
-                ('cmd_vel_topic', '/cmd_vel'),
                 ('map_topic', '/map'),
-                ('default_tolerance', 0.2),
                 ('publish_path', True),
-                ('max_planning_time', 10.0),  # Maximum time to spend planning
+                ('allow_diagonal', True),
+                ('heuristic_weight', 1.0),
+                ('inflation_radius', 0.4),
+                ('obstacle_threshold', 50),
             ])
 
-        # Get parameters
         self.service_name = self.get_parameter('service_name').value
         self.path_topic = self.get_parameter('path_topic').value
-        self.default_tolerance = self.get_parameter('default_tolerance').value
-        self.publish_path = self.get_parameter('publish_path').value
-        self.max_planning_time = self.get_parameter('max_planning_time').value
+        self.publish_path_flag = self.get_parameter('publish_path').value
+        self.allow_diagonal = self.get_parameter('allow_diagonal').value
+        self.heuristic_weight = self.get_parameter('heuristic_weight').value
+        self.inflation_radius = self.get_parameter('inflation_radius').value
+        self.obstacle_threshold = self.get_parameter('obstacle_threshold').value
 
-        # Create A* planner instance
-        self.planner = AStarPlanner()
+        self.map_lock = threading.Lock()
+        self.map_data = None
+        self.map_info = None
+        self.inflated_map = None
 
-        # Service server
+        # Services and publishers
         self.path_service = self.create_service(
-            PlanPath,
-            self.service_name,
+            PlanPath, 
+            self.service_name, 
             self.plan_path_callback
         )
-
-        # Path publisher (for visualization)
-        if self.publish_path:
+        
+        if self.publish_path_flag:
             self.path_pub = self.create_publisher(Path, self.path_topic, 10)
-
-        # Emergency stop publisher
-        self.cmd_vel_pub = self.create_publisher(Twist, self.get_parameter('cmd_vel_topic').value, 10)
-
-        # Map subscriber (delegate to A* planner)
+        
+        # Map subscriber
         self.map_sub = self.create_subscription(
-            OccupancyGrid,
-            self.get_parameter('map_topic').value,
-            self.map_callback,
+            OccupancyGrid, 
+            self.get_parameter('map_topic').value, 
+            self.map_callback, 
             10
         )
 
-        # State variables
-        self.current_path = None
-        self.planning_active = False
-
-        self.get_logger().info(f"Path Planning Service '{self.service_name}' ready")
+        self.get_logger().info("=" * 60)
+        self.get_logger().info(f"Path Planning Service")
+        self.get_logger().info(f"  Service: {self.service_name}")
+        self.get_logger().info(f"  Path topic: {self.path_topic}")
+        self.get_logger().info(f"  Inflation radius: {self.inflation_radius}m")
+        self.get_logger().info(f"  Allow diagonal: {self.allow_diagonal}")
+        self.get_logger().info("=" * 60)
 
     def map_callback(self, msg):
-        """Forward map updates to A* planner"""
-        self.planner.map_callback(msg)
+        with self.map_lock:
+            self.map_data = np.array(msg.data, dtype=np.int8).reshape(
+                msg.info.height, msg.info.width
+            )
+            self.map_info = msg.info
+            
+            inflation_cells = int(math.ceil(
+                self.inflation_radius / msg.info.resolution
+            ))
+            self.inflated_map = self._inflate_obstacles(
+                self.map_data, inflation_cells
+            )
+            
+            orig = np.sum(self.map_data > self.obstacle_threshold)
+            infl = np.sum(self.inflated_map > self.obstacle_threshold)
+            self.get_logger().info(
+                f"[MAP] {msg.info.width}x{msg.info.height}, "
+                f"inflation={inflation_cells} cells, "
+                f"obstacles: {orig}->{infl}"
+            )
 
-    def validate_pose(self, pose_stamped, pose_name):
-        """Validate that a pose is reasonable"""
-        if not pose_stamped.header.frame_id:
-            return False, f"{pose_name} pose has no frame_id"
+    def _inflate_obstacles(self, grid, inflation_cells):
+        """Inflate obstacles"""
+        binary = (grid > self.obstacle_threshold).astype(np.uint8)
+        inflated = np.zeros_like(binary)
+        height, width = binary.shape
+        
+        obstacle_y, obstacle_x = np.where(binary > 0)
+        
+        for oy, ox in zip(obstacle_y, obstacle_x):
+            for dy in range(-inflation_cells, inflation_cells + 1):
+                for dx in range(-inflation_cells, inflation_cells + 1):
+                    if dx*dx + dy*dy <= inflation_cells*inflation_cells:
+                        ny, nx = oy + dy, ox + dx
+                        if 0 <= ny < height and 0 <= nx < width:
+                            inflated[ny, nx] = 1
+        
+        result = grid.copy()
+        result[inflated > 0] = 100
+        return result
 
-        # Check for NaN or infinite values
-        pos = pose_stamped.pose.position
-        if (not math.isfinite(pos.x) or not math.isfinite(pos.y) or
-            not math.isfinite(pos.z)):
-            return False, f"{pose_name} pose has invalid position coordinates"
+    def world_to_grid(self, wx, wy):
+        """Convert world coordinates to grid coordinates"""
+        if self.map_info is None:
+            return None, None
+        ox = self.map_info.origin.position.x
+        oy = self.map_info.origin.position.y
+        res = self.map_info.resolution
+        gx = int(round((wx - ox) / res))
+        gy = int(round((wy - oy) / res))
+        return gx, gy
 
-        # Check orientation (should be normalized quaternion)
-        orient = pose_stamped.pose.orientation
-        if (not math.isfinite(orient.x) or not math.isfinite(orient.y) or
-            not math.isfinite(orient.z) or not math.isfinite(orient.w)):
-            return False, f"{pose_name} pose has invalid orientation"
+    def grid_to_world(self, gx, gy):
+        """Convert grid coordinates to world coordinates"""
+        if self.map_info is None:
+            return None, None
+        ox = self.map_info.origin.position.x
+        oy = self.map_info.origin.position.y
+        res = self.map_info.resolution
+        wx = ox + (gx + 0.5) * res
+        wy = oy + (gy + 0.5) * res
+        return wx, wy
 
-        # Check if quaternion is approximately normalized
-        norm = math.sqrt(orient.x**2 + orient.y**2 + orient.z**2 + orient.w**2)
-        if abs(norm - 1.0) > 0.1:
-            # Try to normalize
-            if norm > 0.01:  # Avoid division by zero
-                orient.x /= norm
-                orient.y /= norm
-                orient.z /= norm
-                orient.w /= norm
-                self.get_logger().warn(f"{pose_name} quaternion was not normalized, fixed")
+    def is_valid(self, gx, gy, inflated_map):
+        """
+        Check if grid cell is valid
+        Note: numpy array indexing is [row, col] = [y, x]
+        """
+        height, width = inflated_map.shape
+        
+        # Boundary check
+        if gx < 0 or gx >= width or gy < 0 or gy >= height:
+            return False
+        
+        # Obstacle check - note indexing order is [y, x]
+        cell_value = inflated_map[gy, gx]
+
+        # Handle unknown areas (-1) as obstacles for safety
+        if cell_value == -1:
+            return False
+
+        return cell_value < self.obstacle_threshold
+
+    def get_neighbors(self, x, y, inflated_map):
+        """Get neighbor nodes"""
+        neighbors = []
+        
+        if self.allow_diagonal:
+            directions = [
+                (-1,-1), (-1,0), (-1,1),
+                (0,-1),          (0,1),
+                (1,-1),  (1,0),  (1,1)
+            ]
+        else:
+            directions = [(-1,0), (1,0), (0,-1), (0,1)]
+        
+        for dx, dy in directions:
+            nx, ny = x + dx, y + dy
+            
+            if not self.is_valid(nx, ny, inflated_map):
+                continue
+            
+            # Check corner cutting when moving diagonally
+            if abs(dx) + abs(dy) == 2:
+                if not self.is_valid(x + dx, y, inflated_map):
+                    continue
+                if not self.is_valid(x, y + dy, inflated_map):
+                    continue
+                cost = math.sqrt(2)
             else:
-                return False, f"{pose_name} pose has zero quaternion"
+                cost = 1.0
+            
+            neighbors.append((nx, ny, cost))
+        
+        return neighbors
 
-        return True, "Valid"
+    def heuristic(self, x1, y1, x2, y2):
+        """Heuristic function"""
+        dx, dy = abs(x2 - x1), abs(y2 - y1)
+        if self.allow_diagonal:
+            # Diagonal distance (improved Chebyshev distance)
+            return max(dx, dy) + (math.sqrt(2) - 1) * min(dx, dy)
+        return dx + dy
+
+    def plan_astar(self, start_world, goal_world):
+        """A* path planning"""
+        with self.map_lock:
+            if self.inflated_map is None:
+                self.get_logger().error("[PLAN] No map available")
+                return None
+            inflated_map = self.inflated_map.copy()
+        
+        # Convert to grid coordinates
+        sx, sy = self.world_to_grid(start_world[0], start_world[1])
+        gx, gy = self.world_to_grid(goal_world[0], goal_world[1])
+        
+        if sx is None or gx is None:
+            self.get_logger().error("[PLAN] Invalid coordinates")
+            return None
+        
+        height, width = inflated_map.shape
+        self.get_logger().info(
+            f"[PLAN] Grid: ({sx},{sy}) -> ({gx},{gy}), "
+            f"Map: {width}x{height}"
+        )
+        
+        # Check start and goal points
+        if not self.is_valid(sx, sy, inflated_map):
+            self.get_logger().error(
+                f"[PLAN] Start ({sx},{sy}) in obstacle! "
+                f"Value={inflated_map[sy, sx]}"
+            )
+            return None
+        
+        if not self.is_valid(gx, gy, inflated_map):
+            self.get_logger().error(
+                f"[PLAN] Goal ({gx},{gy}) in obstacle! "
+                f"Value={inflated_map[gy, gx]}"
+            )
+            return None
+        
+        # A* search
+        open_list = []
+        closed_set = set()
+        
+        start_node = Node2D(
+            sx, sy, 0.0, 
+            self.heuristic_weight * self.heuristic(sx, sy, gx, gy)
+        )
+        heapq.heappush(open_list, start_node)
+        all_nodes = {(sx, sy): start_node}
+        
+        iterations = 0
+        max_iterations = 100000
+        
+        while open_list and iterations < max_iterations:
+            iterations += 1
+            
+            current = heapq.heappop(open_list)
+            cx, cy = current.x, current.y
+            
+            # Reached goal
+            if cx == gx and cy == gy:
+                self.get_logger().info(
+                    f"[PLAN] Path found in {iterations} iterations"
+                )
+                
+                # Reconstruct path
+                path = []
+                node = current
+                while node:
+                    wx, wy = self.grid_to_world(node.x, node.y)
+                    path.append((wx, wy))
+                    node = node.parent
+                
+                path.reverse()
+                self.get_logger().info(f"[PLAN] Path has {len(path)} points")
+                return path
+            
+            if (cx, cy) in closed_set:
+                continue
+            closed_set.add((cx, cy))
+            
+            # Expand neighbors
+            for nx, ny, move_cost in self.get_neighbors(cx, cy, inflated_map):
+                if (nx, ny) in closed_set:
+                    continue
+                
+                new_cost = current.cost + move_cost
+                
+                if (nx, ny) in all_nodes:
+                    existing = all_nodes[(nx, ny)]
+                    if new_cost < existing.cost:
+                        existing.cost = new_cost
+                        existing.parent = current
+                        heapq.heappush(open_list, existing)
+                else:
+                    h = self.heuristic_weight * self.heuristic(nx, ny, gx, gy)
+                    new_node = Node2D(nx, ny, new_cost, h, current)
+                    all_nodes[(nx, ny)] = new_node
+                    heapq.heappush(open_list, new_node)
+        
+        self.get_logger().error(
+            f"[PLAN] No path found after {iterations} iterations"
+        )
+        return None
 
     def plan_path_callback(self, request, response):
-        """Handle path planning service requests"""
-        start_time = time.time()
-
+        """Path planning service callback"""
+        t0 = time.time()
+        
         try:
-            # Validate inputs
-            valid_start, start_msg = self.validate_pose(request.start, "Start")
-            if not valid_start:
-                response.success = False
-                response.message = start_msg
-                response.planning_time = time.time() - start_time
-                return response
-
-            valid_goal, goal_msg = self.validate_pose(request.goal, "Goal")
-            if not valid_goal:
-                response.success = False
-                response.message = goal_msg
-                response.planning_time = time.time() - start_time
-                return response
-
-            # Check if map is available
-            if self.planner.map_data is None:
-                response.success = False
-                response.message = "No map available for path planning"
-                response.planning_time = time.time() - start_time
-                return response
-
-            # Convert poses to world coordinates
-            start_world = (
-                request.start.pose.position.x,
+            start = (
+                request.start.pose.position.x, 
                 request.start.pose.position.y
             )
-            goal_world = (
-                request.goal.pose.position.x,
+            goal = (
+                request.goal.pose.position.x, 
                 request.goal.pose.position.y
             )
-
-            # Log the planning request
+            
             self.get_logger().info(
-                f"Planning path from ({start_world[0]:.2f}, {start_world[1]:.2f}) "
-                f"to ({goal_world[0]:.2f}, {goal_world[1]:.2f})"
+                f"Planning: ({start[0]:.2f},{start[1]:.2f}) -> "
+                f"({goal[0]:.2f},{goal[1]:.2f})"
             )
-
-            # Set planning active flag
-            self.planning_active = True
-
-            # Plan the path
-            path_points = self.planner.plan_path(start_world, goal_world)
-
-            # Check planning time
-            planning_time = time.time() - start_time
-            if planning_time > self.max_planning_time:
-                self.get_logger().warn(f"Path planning took {planning_time:.2f}s (max: {self.max_planning_time}s)")
-
-            if path_points is None or len(path_points) == 0:
+            
+            # Plan path
+            path = self.plan_astar(start, goal)
+            dt = time.time() - t0
+            
+            if not path:
                 response.success = False
-                response.message = "Failed to find a valid path"
-                response.planning_time = planning_time
-                self.planning_active = False
+                response.message = "No path found"
+                response.planning_time = dt
                 return response
-
+            
             # Create path message
-            frame_id = request.start.header.frame_id or "map"
-            path_msg = self.planner.create_path_message(path_points, frame_id)
-
-            if path_msg is None:
-                response.success = False
-                response.message = "Failed to create path message"
-                response.planning_time = planning_time
-                self.planning_active = False
-                return response
-
-            # Store current path
-            self.current_path = path_msg
-
+            path_msg = Path()
+            path_msg.header.frame_id = request.start.header.frame_id or "map"
+            path_msg.header.stamp = self.get_clock().now().to_msg()
+            
+            for i, (x, y) in enumerate(path):
+                pose = PoseStamped()
+                pose.header = path_msg.header
+                pose.pose.position.x = x
+                pose.pose.position.y = y
+                pose.pose.position.z = 0.0
+                
+                # Calculate orientation
+                if i < len(path) - 1:
+                    nx, ny = path[i + 1]
+                    yaw = math.atan2(ny - y, nx - x)
+                    pose.pose.orientation.z = math.sin(yaw / 2.0)
+                    pose.pose.orientation.w = math.cos(yaw / 2.0)
+                else:
+                    pose.pose.orientation.w = 1.0
+                
+                path_msg.poses.append(pose)
+            
             # Publish path for visualization
-            if self.publish_path and self.path_pub:
+            if self.publish_path_flag and self.path_pub:
                 self.path_pub.publish(path_msg)
-
-            # Success response
+            
             response.success = True
             response.path = path_msg
-            response.message = f"Path planned successfully with {len(path_points)} waypoints"
-            response.planning_time = planning_time
-
+            response.message = f"Path planned with {len(path)} points"
+            response.planning_time = dt
+            
             self.get_logger().info(
-                f"Path planned successfully: {len(path_points)} points, "
-                f"planning time: {planning_time:.3f}s"
+                f"✓ Planning succeeded: {len(path)} points, {dt:.3f}s"
             )
-
+            
         except Exception as e:
-            # Handle any unexpected errors
-            error_msg = f"Path planning failed with exception: {str(e)}"
-            self.get_logger().error(error_msg)
+            import traceback
+            self.get_logger().error(f"Planning error: {e}")
+            traceback.print_exc()
             response.success = False
-            response.message = error_msg
-            response.planning_time = time.time() - start_time
-
-        finally:
-            self.planning_active = False
-
+            response.message = str(e)
+            response.planning_time = time.time() - t0
+        
         return response
-
-    def emergency_stop(self):
-        """Publish emergency stop command"""
-        stop_cmd = Twist()  # All zeros
-        self.cmd_vel_pub.publish(stop_cmd)
-        self.get_logger().warn("Emergency stop command published")
-
-    def get_current_path(self):
-        """Get the currently planned path"""
-        return self.current_path
-
-    def clear_current_path(self):
-        """Clear the current path"""
-        self.current_path = None
-        self.get_logger().info("Current path cleared")
 
 
 def main(args=None):
     rclpy.init(args=args)
-
-    service_node = PathPlanningService()
-
+    node = PathPlanningService()
     try:
-        rclpy.spin(service_node)
+        rclpy.spin(node)
     except KeyboardInterrupt:
-        service_node.get_logger().info("Path planning service shutting down")
-    except Exception as e:
-        service_node.get_logger().error(f"Path planning service error: {e}")
+        node.get_logger().info("Shutting down...")
     finally:
-        # Emergency stop on shutdown
-        try:
-            service_node.emergency_stop()
-        except:
-            pass
-        service_node.destroy_node()
+        node.destroy_node()
         rclpy.shutdown()
 
 
