@@ -114,3 +114,5 @@ frames.gv
 *.db3-shm
 *.db3-wal
 
+# Claude AI 配置文件
+CLAUDE.md
