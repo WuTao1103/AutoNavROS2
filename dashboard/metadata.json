@@ -1,0 +1,5 @@
+{
+  "name": "ROS2 NavViz Dashboard",
+  "description": "A comprehensive frontend for ROS2 navigation, featuring real-time SLAM visualization, teleoperation controls, and robot status monitoring.",
+  "requestFramePermissions": []
+}

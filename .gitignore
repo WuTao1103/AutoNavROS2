@@ -1,0 +1,116 @@
+# ROS2 / Colcon 构建产物
+build/
+install/
+log/
+
+# Python 缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.manifest
+*.spec
+
+# 虚拟环境
+venv/
+ENV/
+env/
+.venv
+
+# CMake 构建文件
+CMakeLists.txt.user
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps
+
+# IDE 配置文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.bak
+
+# Cursor AI 相关
+.cursor/
+.cursorrules
+
+# ROS 相关
+*.bag
+*.bag.active
+*.bag.orig
+.catkin_workspace
+devel/
+devel_isolated/
+
+# 测试和调试文件
+*.log
+*.out
+*.tmp
+*.temp
+
+# 文档构建
+_build/
+*.doctree
+
+# 系统文件
+.directory
+Thumbs.db
+ehthumbs.db
+
+# 备份文件
+*~
+*.orig
+*.rej
+*.swp
+*.swo
+
+# 数据文件（根据需要调整）
+# data/*
+# !data/empty
+# !data/README.md
+
+# 机密信息（如果有）
+*.pem
+*.key
+secrets/
+credentials/
+
+# Gazebo
+.gazebo/
+models/
+media/
+
+# RViz
+*.rviz~
+
+# TF frames（临时文件）
+frames.pdf
+frames.gv
+
+# ROS2 bag 文件（如果需要提交，可以注释掉）
+*.db3
+*.db3-shm
+*.db3-wal
+

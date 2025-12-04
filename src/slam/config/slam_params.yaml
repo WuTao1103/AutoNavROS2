@@ -1,0 +1,57 @@
+# SLAM System Parameters
+
+# Occupancy Grid Mapper Parameters
+occupancy_grid_mapper:
+  ros__parameters:
+    # Map dimensions and resolution
+    map_width: 200              # cells (20m x 20m at 0.1m resolution)
+    map_height: 200             # cells
+    map_resolution: 0.1         # meters per cell
+    map_origin_x: -10.0         # meters
+    map_origin_y: -10.0         # meters
+
+    # Topics
+    scan_topic: "/scan"
+    odom_topic: "/odom"
+    map_topic: "/map"
+
+    # Frames
+    map_frame: "map"
+    robot_frame: "base_link"
+    odom_frame: "odom"
+
+    # Publishing
+    publish_rate: 2.0           # Hz - map publishing frequency
+
+    # Occupancy probabilities
+    hit_probability: 0.7        # Probability for occupied cell
+    miss_probability: 0.3       # Probability for free cell
+    occupied_threshold: 0.65    # Threshold for marking cell as occupied
+    free_threshold: 0.35        # Threshold for marking cell as free
+
+    # Laser parameters
+    max_range: 10.0             # Maximum laser range to use (meters)
+    min_range: 0.1              # Minimum laser range to use (meters)
+
+# Simple Odometry Parameters
+simple_odometry:
+  ros__parameters:
+    # Topics
+    cmd_vel_topic: "/cmd_vel"
+    odom_topic: "/odom"
+
+    # Frames
+    odom_frame: "odom"
+    base_frame: "base_link"
+
+    # Publishing
+    publish_rate: 50.0          # Hz - odometry publishing frequency
+
+    # Robot parameters (TurtleBot3 Burger)
+    wheel_base: 0.16            # meters
+    wheel_radius: 0.033         # meters
+
+    # Estimation method
+    use_cmd_vel_estimation: true # Use cmd_vel for motion estimation
+
+# Static transforms are handled by launch file, not parameters
