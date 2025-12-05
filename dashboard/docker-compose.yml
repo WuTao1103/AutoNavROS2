@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  ros-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    ports:
+      - "1031:80"
+    container_name: ros2-navviz-dashboard
+    restart: unless-stopped
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+

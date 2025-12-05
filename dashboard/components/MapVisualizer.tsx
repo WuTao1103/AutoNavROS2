@@ -169,13 +169,23 @@ export const MapVisualizer: React.FC<MapVisualizerProps> = ({
       if (!canvas || !mapData) return;
 
       const rect = canvas.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
+      // Get mouse position relative to the displayed canvas
+      const displayX = e.clientX - rect.left;
+      const displayY = e.clientY - rect.top;
 
+      // Convert display coordinates to canvas logical coordinates
+      // Canvas might be scaled by CSS, so we need to account for that
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const canvasX = displayX * scaleX;
+      const canvasY = displayY * scaleY;
+
+      // Now use canvas logical dimensions for transform calculation
       const { scale, offsetX, offsetY } = getTransform(canvas.width, canvas.height);
 
-      const worldX = (x - offsetX) / scale;
-      const worldY = (y - offsetY) / scale;
+      // Convert canvas coordinates to world coordinates
+      const worldX = (canvasX - offsetX) / scale;
+      const worldY = (canvasY - offsetY) / scale;
 
       // Validate bounds
       if (worldX >= 0 && worldX <= MAP_SIZE * MAP_RESOLUTION &&
